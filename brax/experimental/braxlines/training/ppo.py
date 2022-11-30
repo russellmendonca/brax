@@ -183,6 +183,7 @@ def train(environment_fn: Callable[..., envs.Env],
   local_devices_to_use = local_device_count
   if max_devices_per_host:
     local_devices_to_use = min(local_devices_to_use, max_devices_per_host)
+  
   logging.info(
       'Device count: %d, process count: %d (id %d), local device count: %d, '
       'devices to be used count: %d', jax.device_count(), process_count,
@@ -231,7 +232,7 @@ def train(environment_fn: Callable[..., envs.Env],
     first_state, step_fn = env.wrap(
         core_env, key, extra_step_kwargs=extra_step_kwargs)
     tmp_env_states.append(first_state)
-  first_state = jax.tree_multimap(lambda *args: jnp.stack(args),
+  first_state = jax.tree_map(lambda *args: jnp.stack(args),
                                   *tmp_env_states)
 
   normalizer_params, obs_normalizer_update_fn, obs_normalizer_apply_fn = (
@@ -509,3 +510,39 @@ def make_inference_fn(
     return action
 
   return inference_fn
+
+def make_params_and_inference_fn(
+    observation_size: int,
+    action_size: int,
+    normalize_observations: bool = False,
+    parametric_action_distribution_fn: Optional[Callable[[
+        int,
+    ], distribution.ParametricDistribution]] = distribution
+    .NormalTanhDistribution,
+    make_models_fn: Optional[Callable[
+        [int, int], Tuple[networks.FeedForwardModel]]] = networks.make_models,
+    extra_params: Dict[str, Dict[str, jnp.ndarray]] = None,
+):
+  """Creates params and inference function for the PPO agent."""
+  obs_normalizer_params, obs_normalizer_apply_fn = normalization.make_data_and_apply_fn(
+      observation_size, normalize_observations=normalize_observations)
+  parametric_action_distribution = parametric_action_distribution_fn(
+      event_size=action_size)
+  policy_model, _ = make_models_fn(parametric_action_distribution.param_size,
+                                   observation_size)
+
+  def inference_fn(params, obs, key):
+    normalizer_params, policy_params = params['normalizer'], params['policy']
+    obs = obs_normalizer_apply_fn(normalizer_params, obs)
+    action = parametric_action_distribution.sample(
+        policy_model.apply(policy_params, obs), key)
+    return action
+
+  params = dict(
+      normalizer=obs_normalizer_params,
+      policy=policy_model.init(jax.random.PRNGKey(0)),
+      extra={} if extra_params is None else extra_params
+      )
+  return params, inference_fn
+
+
