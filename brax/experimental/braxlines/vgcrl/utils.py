@@ -260,6 +260,7 @@ class ParameterizeWrapper(Env):
     """Concatenate state with param and recompute reward."""
     new_obs = self.disc.concat_obs(state.obs, z)
     state = state.replace(obs=new_obs)
+    state.metrics['base_env_reward'] = state.reward
     if replace_reward:
       new_obs = self.disc.normalize_fn(normalizer_params, new_obs)
       env_obs, z = self.disc.split_obs(new_obs)
@@ -294,6 +295,51 @@ class ParameterizeWrapper(Env):
         state, z, normalizer_params, extra_params, replace_reward=True)
 
   def step2(self, state: State, action: jnp.ndarray) -> State:
+    """Run one timestep of the environment's dynamics."""
+    _, z = self.disc.split_obs(state.obs)
+    state = self._environment.step(state, action)
+    return self.concat(state, z, replace_reward=False)
+  
+class FixedSkillWrapper(Env):
+  def __init__(self,
+               environment: Env,
+               z: jnp.ndarray,
+               disc: Discriminator,
+               ):
+    self._environment = environment
+    self.action_repeat = self._environment.action_repeat
+    if hasattr(self._environment, 'batch_size'):
+      self.batch_size = self._environment.batch_size
+    else:
+      self.batch_size = None
+    self.sys = self._environment.sys
+    self.z = z
+    self.disc = disc
+    self.z_size = disc.z_size
+    self.env_obs_size = self._environment.observation_size
+
+  def concat(
+      self,
+      state: State,
+      z: jnp.ndarray,
+      replace_reward: bool = True,
+  ) -> State:
+    """Concatenate state with param and recompute reward."""
+    assert not replace_reward
+    new_obs = self.disc.concat_obs(state.obs, z)
+    state = state.replace(obs=new_obs)
+    state.metrics['base_env_reward'] = state.reward
+    return state
+
+  def reset(self, rng: jnp.ndarray) -> State:
+    """Resets the environment to an initial state."""
+    state = self._environment.reset(rng)
+    z = self.z
+    if len(state.obs.shape) == 2 and len(self.z.shape) == 1:
+      z = jnp.tile(z, (state.obs.shape[0], 1))
+    return self.concat(state, z, replace_reward=False)
+
+  def step(self, state: State, action: jnp.ndarray, *args, **kwargs) -> State:
     """Run one timestep of the environment's dynamics."""
     _, z = self.disc.split_obs(state.obs)
     state = self._environment.step(state, action)
